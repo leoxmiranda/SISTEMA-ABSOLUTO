@@ -114,6 +114,10 @@ const commands = [
     .setDescription('📖 Información sobre el Sistema del Absoluto y sus reglas.'),
 
   new SlashCommandBuilder()
+    .setName('manual')
+    .setDescription('📚 Manual oficial del Sistema del Absoluto. Consulta reglas, roles y entidades.'),
+
+  new SlashCommandBuilder()
     .setName('reset-constelacion')
     .setDescription('🔄 [ADMIN] Reinicia los datos de una constelación.')
     .addUserOption(opt =>
@@ -376,6 +380,27 @@ client.on('interactionCreate', async (interaction) => {
       `[YouTube](https://youtube.com/@eldominioabsoluto)`,
     );
     return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /manual ──────────────────────────────────────────────
+  if (interaction.commandName === 'manual') {
+    const manualEmbed = new EmbedBuilder()
+      .setColor(0x00cfff)
+      .setTitle('📚 MANUAL OFICIAL — Sistema del Absoluto')
+      .setDescription('`⬛` *Protocolo de Transmisión v1.0 — Reglas, Roles y Entidades del Dominio Absoluto.*`')
+      .setThumbnail('https://raw.githubusercontent.com/leoxmiranda/bot-dominio-absoluto/main/assets/mascot.png')
+      .addFields(
+        { name: '👑 EL SER ABSOLUTO', value: '_Soberano del Dominio. Su palabra es ley._', inline: false },
+        { name: '🟢 EL JUGADOR', value: '_Protagonista de los escenarios en Minecraft._', inline: false },
+        { name: '🔴 CRONOS', value: '_Ejecutor del Caos. Envía calamidades._', inline: false },
+        { name: '🟡 AURA', value: '_Ejecutora de Bendiciones. Da suministros y curaciones._', inline: false },
+        { name: '⬜ CONSTELACIONES', value: '_Los espectadores. Pueden influir con Puntos Estelares._', inline: false },
+      )
+      .addFields({ name: '📜 REGLAS CLAVE', value: '**1️⃣** El Ser Absoluto tiene poder de veto sobre escenarios.\n**2️⃣** Puntos con \`/diario\` y actividad.\n**3️⃣** Tu número es inmutable hasta obtener Nombre Propio.\n**4️⃣** El Mercado Estelar llega en v2.0.' })
+      .setImage('https://raw.githubusercontent.com/leoxmiranda/bot-dominio-absoluto/main/assets/frame_banner_wide.png')
+      .setFooter({ text: '⟡ Sistema del Absoluto v1.0 • Página Web: eldominioabsoluto.com' })
+      .setTimestamp();
+    return interaction.reply({ embeds: [manualEmbed] });
   }
 
   // ── /reset-constelacion ────────────────────────────────
