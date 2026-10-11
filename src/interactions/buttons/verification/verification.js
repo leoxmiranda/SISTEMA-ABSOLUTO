@@ -20,7 +20,7 @@ function saveDatabase(data) {
 
 module.exports = {
     data: {
-        name: 'verify' // Identificador de tu botón
+        name: 'verify_user' // 👈 Coincide exactamente con el customId del botón
     },
     async execute(interaction, client) {
         if (!interaction.isButton()) return;
