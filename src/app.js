@@ -1,431 +1,435 @@
-﻿import 'dotenv/config';
-import { Client, Collection, GatewayIntentBits } from 'discord.js';
-import { REST } from '@discordjs/rest';
+// ══════════════════════════════════════════════════════════════
+// ⬛  SISTEMA DEL ABSOLUTO — Bot Principal
+// ══════════════════════════════════════════════════════════════
+// Gestiona las Constelaciones del Dominio Absoluto.
+// Asigna apodos secuenciales inmutables a cada miembro.
+// ══════════════════════════════════════════════════════════════
+
+import 'dotenv/config';
+import {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  SlashCommandBuilder,
+  REST,
+  Routes,
+  PermissionFlagsBits,
+  ActivityType,
+} from 'discord.js';
 import express from 'express';
-import cron from 'node-cron';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-import config from './config/application.js';
-import { initializeDatabase } from './utils/database.js';
-import { getGuildConfig } from './services/config/guildConfig.js';
-import { getServerCounters, saveServerCounters, updateCounter } from './services/serverstatsService.js';
-import { logger, startupLog, shutdownLog } from './utils/logger.js';
-import { checkBirthdays } from './services/birthdayService.js';
-import { checkGiveaways } from './services/giveawayService.js';
-import { loadCommands, registerCommands as registerSlashCommands } from './handlers/loaders/commandLoader.js';
-import { runSafeTask, handleTaskError, ErrorCodes } from './utils/errorHandler.js';
-import { initializeMusic } from './services/music/riffySetup.js';
-import { shutdownMusic } from './services/music/playerHandler.js';
-import pkg from '../package.json' with { type: 'json' };
-import { EXPECTED_SCHEMA_VERSION, EXPECTED_SCHEMA_LABEL } from './config/database/schemaVersion.js';
+// ── Paths ──────────────────────────────────────────────────
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const DB_PATH = path.join(DATA_DIR, 'constellations.json');
 
-class TitanBot extends Client {
-  constructor() {
-    super({
-      intents: [
-        
-        GatewayIntentBits.Guilds,                        
-        GatewayIntentBits.GuildMembers,                 
-
-        GatewayIntentBits.GuildMessages,                
-        GatewayIntentBits.GuildMessageReactions,        
-        GatewayIntentBits.MessageContent,               
-        GatewayIntentBits.DirectMessages,
-
-        GatewayIntentBits.GuildVoiceStates,             
-
-        GatewayIntentBits.GuildBans,                    
-      ],
-    });
-
-    this.config = config;
-    this.commands = new Collection();
-    this.events = new Collection();
-    this.buttons = new Collection();
-    this.selectMenus = new Collection();
-    this.modals = new Collection();
-    this.cooldowns = new Collection();
-    this.db = null;
-    this.rest = new REST({ version: '10' }).setToken(config.bot.token);
-  }
-
-  async start() {
-    try {
-      startupLog('Starting TitanBot...');
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      startupLog('Initializing database...');
-      const dbInstance = await initializeDatabase();
-      this.db = dbInstance.db;
-
-      // Check database status and report
-      const dbStatus = this.db.getStatus();
-      if (dbStatus.isDegraded) {
-        logger.warn('');
-        logger.warn('╔═══════════════════════════════════════════════════════╗');
-        logger.warn('║ ⚠️  DATABASE RUNNING IN DEGRADED MODE                 ║');
-        logger.warn('║                                                       ║');
-        logger.warn('║ Connection: In-Memory Storage (PostgreSQL unavailable)║');
-        logger.warn('║ Data Persistence: DISABLED - data lost on restart    ║');
-        logger.warn('║ Action Required: Fix PostgreSQL and restart bot      ║');
-        logger.warn('╚═══════════════════════════════════════════════════════╝');
-        logger.warn('');
-      } else {
-        startupLog(`✅ Database Status: ${dbStatus.connectionType} (fully operational)`);
-      }
-      
-      startupLog('Starting web server...');
-      this.startWebServer();
-      
-      startupLog('Loading commands...');
-      await loadCommands(this);
-      startupLog(`Commands loaded: ${this.commands.size}`);
-      
-      startupLog('Loading handlers...');
-      await this.loadHandlers();
-      startupLog('Handlers loaded');
-
-      initializeMusic(this);
-      
-      startupLog('Logging into Discord...');
-      await this.login(this.config.bot.token);
-      startupLog('Discord login successful');
-      
-      startupLog('Registering slash commands globally...');
-      await this.registerCommands();
-      startupLog('Slash commands registration complete');
-      
-      const databaseMode = dbStatus.isDegraded
-        ? 'Optional in-memory mode (data resets after restart)'
-        : 'Connected (persistent data enabled)';
-      const handlerSummary = `${this.buttons.size} buttons, ${this.selectMenus.size} menus, ${this.modals.size} modals`;
-      startupLog(
-        `ONLINE ✅ | ${this.commands.size} commands loaded | ${handlerSummary} | Database: ${databaseMode}`
-      );
-      
-      this.setupCronJobs();
-    } catch (error) {
-      logger.error('Failed to start bot:', error);
-      process.exit(1);
+// ── Database helpers ───────────────────────────────────────
+function loadDB() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(DB_PATH)) {
+      const empty = { lastCounter: 0, users: {} };
+      fs.writeFileSync(DB_PATH, JSON.stringify(empty, null, 2));
+      return empty;
     }
+    return JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
+  } catch {
+    return { lastCounter: 0, users: {} };
   }
+}
 
-  startWebServer() {
-    const app = express();
-    const configuredPort = Number(this.config.api?.port || process.env.PORT || 3000);
-    const maxPortRetryAttempts = Number(process.env.PORT_RETRY_ATTEMPTS || 5);
-    const host = process.env.WEB_HOST || '0.0.0.0';
-    const corsOrigin = this.config.api?.cors?.origin || '*';
-    
-    app.use((req, res, next) => {
-      const allowedOrigins = Array.isArray(corsOrigin) ? corsOrigin : [corsOrigin];
-      const origin = req.headers.origin;
-      
-      if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
-        res.header('Access-Control-Allow-Origin', origin || '*');
-      }
-      res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-      
-      if (req.method === 'OPTIONS') {
-        return res.sendStatus(200);
-      }
-      next();
+function saveDB(data) {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
+}
+
+// ── Formatters ─────────────────────────────────────────────
+function padNumber(n) {
+  return String(n).padStart(6, '0');
+}
+
+function constellationNick(number) {
+  return `Constelación Sin Nombre N-${padNumber(number)}`;
+}
+
+// ── Embed builder (sistema style) ──────────────────────────
+function systemEmbed(title, description) {
+  return new EmbedBuilder()
+    .setColor(0x00cfff)               // cyan del sistema
+    .setTitle(`⬛ ${title}`)
+    .setDescription(description)
+    .setFooter({ text: '⟡ Sistema del Absoluto v1.0' })
+    .setTimestamp();
+}
+
+// ── Role finder / creator ──────────────────────────────────
+async function ensureRole(guild, roleName, color = 0x00cfff) {
+  let role = guild.roles.cache.find(r => r.name === roleName);
+  if (!role) {
+    role = await guild.roles.create({
+      name: roleName,
+      color,
+      reason: 'Sistema del Absoluto — rol automático',
     });
+  }
+  return role;
+}
 
-    const requestCounts = new Map();
-    const windowMs = this.config.api?.rateLimit?.windowMs || 60000;
-    const maxRequests = this.config.api?.rateLimit?.max || 100;
-    
-    app.use((req, res, next) => {
-      const ip = req.ip;
-      const now = Date.now();
-      const windowStart = now - windowMs;
-      
-      if (!requestCounts.has(ip)) {
-        requestCounts.set(ip, []);
-      }
-      
-      const times = requestCounts.get(ip).filter(t => t > windowStart);
-      
-      if (times.length >= maxRequests) {
-        return res.status(429).json({ error: 'Too many requests' });
-      }
-      
-      times.push(now);
-      requestCounts.set(ip, times);
-      next();
-    });
+// ══════════════════════════════════════════════════════════════
+//  CLIENT
+// ══════════════════════════════════════════════════════════════
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+});
 
-    app.get('/health', (req, res) => {
-      const dbStatus = this.db?.getStatus?.() || { isDegraded: 'unknown' };
-      const status = {
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime(),
-        database: {
-          connected: dbStatus.connectionType !== 'none',
-          degraded: dbStatus.isDegraded,
-          type: dbStatus.connectionType
-        }
-      };
-      res.status(200).json(status);
-    });
+// ── Slash commands definition ──────────────────────────────
+const commands = [
+  new SlashCommandBuilder()
+    .setName('registro')
+    .setDescription('📜 Consulta tu número de Constelación asignado por el Sistema.'),
 
-    app.get('/ready', (req, res) => {
-      const dbStatus = this.db?.getStatus?.() || { isDegraded: true, connectionType: 'none' };
-      const isReady = this.isReady() && !dbStatus.isDegraded;
+  new SlashCommandBuilder()
+    .setName('puntos')
+    .setDescription('⭐ Consulta tus Puntos Estelares actuales.'),
 
-      const metrics = {
-        guildCount: this.guilds?.cache?.size ?? 0,
-        commandCount: this.commands?.size ?? 0,
-        database: {
-          mode: dbStatus.connectionType,
-          degraded: dbStatus.isDegraded,
-          degradedReason: dbStatus.degradedReason ?? null,
-        },
-        schemaVersion: EXPECTED_SCHEMA_VERSION,
-        schemaLabel: EXPECTED_SCHEMA_LABEL,
-      };
+  new SlashCommandBuilder()
+    .setName('ranking')
+    .setDescription('🏆 Muestra el Top 10 de Constelaciones con más Puntos Estelares.'),
 
-      if (isReady) {
-        return res.status(200).json({
-          ready: true,
-          message: 'Bot is ready',
-          metrics,
-        });
-      }
+  new SlashCommandBuilder()
+    .setName('diario')
+    .setDescription('📅 Reclama tus Puntos Estelares diarios (+200 ⭐).'),
 
-      res.status(503).json({
-        ready: false,
-        reason: !this.isReady() ? 'Bot not Ready' : 'Database degraded',
-        metrics,
-      });
-    });
+  new SlashCommandBuilder()
+    .setName('info')
+    .setDescription('📖 Información sobre el Sistema del Absoluto y sus reglas.'),
 
-    app.get('/', (req, res) => {
-      res.status(200).json({ 
-        message: 'TitanBot System Online',
-        version: pkg.version,
-        timestamp: new Date().toISOString()
-      });
-    });
+  new SlashCommandBuilder()
+    .setName('reset-constelacion')
+    .setDescription('🔄 [ADMIN] Reinicia los datos de una constelación.')
+    .addUserOption(opt =>
+      opt.setName('usuario')
+        .setDescription('La constelación a reiniciar')
+        .setRequired(true))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+];
 
-    const startServer = (port, attempt = 0) => {
-      let hasStartedListening = false;
-      const server = app.listen(port, host, () => {
-        hasStartedListening = true;
-        this.webServer = server;
-        startupLog(`✅ Web Server running on ${host}:${port}`);
-        startupLog(`Health endpoint: http://${host}:${port}/health`);
-        startupLog(`Ready endpoint: http://${host}:${port}/ready`);
-      });
+// ══════════════════════════════════════════════════════════════
+//  READY
+// ══════════════════════════════════════════════════════════════
+client.once('ready', async () => {
+  console.log('══════════════════════════════════════════════════');
+  console.log(`⬛ SISTEMA DEL ABSOLUTO — EN LÍNEA`);
+  console.log(`   Bot: ${client.user.tag}`);
+  console.log(`   Servidores: ${client.guilds.cache.size}`);
+  console.log('══════════════════════════════════════════════════');
 
-      server.on('error', (error) => {
-        const errorCode = error?.code || 'UNKNOWN_ERROR';
-        const errorMessage = error?.message || 'Unknown server error';
+  // Status
+  client.user.setActivity('las Constelaciones', { type: ActivityType.Watching });
 
-        if (!hasStartedListening && errorCode === 'EADDRINUSE' && attempt < maxPortRetryAttempts) {
-          const nextPort = port + 1;
-          startupLog(`Port ${port} is already in use. Trying port ${nextPort}...`);
-          setTimeout(() => startServer(nextPort, attempt + 1), 250);
-          return;
-        }
+  // Register slash commands
+  try {
+    const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+    console.log('⟡ Registrando comandos slash...');
+    await rest.put(
+      Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+      { body: commands.map(c => c.toJSON()) },
+    );
+    console.log('✅ Comandos slash registrados.');
+  } catch (err) {
+    console.error('❌ Error registrando comandos:', err);
+  }
+});
 
-        if (hasStartedListening && errorCode === 'EADDRINUSE') {
-          logger.warn(`Web server reported a duplicate bind warning on ${host}:${port}, but the bot remains online.`);
-          return;
-        }
+// ══════════════════════════════════════════════════════════════
+//  MEMBER JOIN — Asignar número secuencial
+// ══════════════════════════════════════════════════════════════
+client.on('guildMemberAdd', async (member) => {
+  if (member.user.bot) return;
 
-        logger.error(`❌ Web server error on port ${port} (${errorCode}): ${errorMessage}`);
+  const db = loadDB();
+  const odId = member.id;
+  let number;
+  let isReturning = false;
 
-        if (!hasStartedListening) {
-          process.exit(1);
-        }
-      });
+  // Check if this user already has a number (returning member)
+  if (db.users[odId]) {
+    number = db.users[odId].number;
+    isReturning = true;
+  } else {
+    // New constellation — assign next number
+    db.lastCounter += 1;
+    number = db.lastCounter;
+    db.users[odId] = {
+      number,
+      points: 0,
+      joinedAt: new Date().toISOString(),
+      lastDaily: null,
+      customName: null,          // null = sin nombre propio
     };
-
-    startServer(configuredPort, 0);
+    saveDB(db);
   }
 
-  setupCronJobs() {
-    cron.schedule('0 6 * * *', runSafeTask('birthday_check', () => checkBirthdays(this)));
-    cron.schedule('* * * * *', runSafeTask('giveaway_check', () => checkGiveaways(this)));
-    cron.schedule('*/15 * * * *', runSafeTask('counter_update', () => this.updateAllCounters()));
+  const nick = constellationNick(number);
+
+  // Set nickname
+  try {
+    await member.setNickname(nick, 'Sistema del Absoluto — asignación automática');
+  } catch (err) {
+    console.error(`No se pudo cambiar el apodo de ${member.user.tag}:`, err.message);
   }
 
-  async updateAllCounters() {
-    if (!this.db) {
-      logger.warn('Database not available for counter updates');
-      return;
-    }
-    
-    for (const [guildId, guild] of this.guilds.cache) {
-      try {
-        const counters = await getServerCounters(this, guildId);
-        const validCounters = [];
-        const orphanedCounters = [];
-        
-        for (const counter of counters) {
-          if (counter && counter.type && counter.channelId && counter.enabled !== false) {
-            const channel = guild.channels.cache.get(counter.channelId);
-            if (channel) {
-              validCounters.push(counter);
-              await updateCounter(this, guild, counter);
-            } else {
-              orphanedCounters.push(counter);
-              logger.info(`Removing orphaned counter ${counter.id} (type: ${counter.type}, deleted channel: ${counter.channelId}) from guild ${guildId}`);
-            }
-          }
-        }
-        
-        // Save cleaned counters if any were orphaned
-        // Save cleaned counters if any were orphaned
-        if (orphanedCounters.length > 0) {
-          await saveServerCounters(this, guildId, validCounters);
-          logger.info(`Cleaned up ${orphanedCounters.length} orphaned counter(s) from guild ${guildId} during scheduled update`);
-        }
-      } catch (error) {
-        logger.error(`Error updating counters for guild ${guildId}:`, error);
-      }
-    }
+  // Assign role
+  try {
+    const role = await ensureRole(member.guild, 'Constelación Sin Nombre');
+    await member.roles.add(role, 'Sistema del Absoluto — rol automático');
+  } catch (err) {
+    console.error(`No se pudo asignar rol a ${member.user.tag}:`, err.message);
   }
 
-  async loadHandlers() {
-    startupLog('Loading handlers...');
-    const handlers = [
-      { path: 'events', type: 'default', required: true },
-      { path: 'interactions', type: 'default', required: true }
-    ];
+  // Welcome message in #bienvenida-constelaciones (or first text channel)
+  const welcomeCh =
+    member.guild.channels.cache.find(c => c.name === 'bienvenida-constelaciones') ||
+    member.guild.channels.cache.find(c => c.isTextBased() && c.permissionsFor(member.guild.members.me)?.has('SendMessages'));
 
-    for (const handler of handlers) {
-      try {
-        startupLog(`Loading handler: ${handler.path}`);
-        const module = await import(`./handlers/loaders/${handler.path}.js`);
-        const loaderFn = handler.type.startsWith('named:')
-          ? module[handler.type.split(':')[1]]
-          : module.default;
-
-        if (typeof loaderFn === 'function') {
-          await loaderFn(this);
-          startupLog(`✅ Loaded ${handler.path}`);
-        } else {
-          throw new Error(`Invalid loader export from ${handler.path}`);
-        }
-      } catch (error) {
-        if (handler.required) {
-          logger.error(`❌ Failed to load required handler ${handler.path}:`, error.message);
-          throw error;
-        } else if (error.code !== 'MODULE_NOT_FOUND') {
-          logger.warn(`⚠️  Failed to load optional handler ${handler.path}:`, error.message);
-        }
-      }
-    }
+  if (welcomeCh) {
+    const embed = systemEmbed(
+      'Nueva Constelación Detectada',
+      isReturning
+        ? `El alma de **${nick}** ha regresado al Dominio.\n\n` +
+          `> *El Sistema recuerda a todas las almas que alguna vez cruzaron este umbral.*\n\n` +
+          `⟡ Tu número es permanente. Bienvenido de vuelta.`
+        : `Una nueva alma ha sido registrada en el Sistema.\n\n` +
+          `**Designación:** \`${nick}\`\n\n` +
+          `> *"Hasta que demuestres tu valor, serás conocido solo por tu número."*\n\n` +
+          `⟡ Puntos Estelares iniciales: **0 ⭐**\n` +
+          `⟡ Usa \`/diario\` cada día para reclamar **+200 ⭐**`,
+    );
+    welcomeCh.send({ embeds: [embed] }).catch(() => {});
   }
+});
 
-  async registerCommands() {
+// ══════════════════════════════════════════════════════════════
+//  NICKNAME CHANGE GUARD — Prevent unauthorized changes
+// ══════════════════════════════════════════════════════════════
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  if (newMember.user.bot) return;
+
+  const db = loadDB();
+  const userData = db.users[newMember.id];
+  if (!userData) return; // not registered
+
+  const expectedNick = userData.customName || constellationNick(userData.number);
+
+  // If nickname was changed to something else, revert it
+  if (newMember.nickname !== expectedNick && newMember.nickname !== null) {
     try {
-      await registerSlashCommands(this, { clientId: this.config.bot.clientId });
-    } catch (error) {
-      logger.error('Error registering commands:', error);
+      await newMember.setNickname(expectedNick, 'Sistema del Absoluto — apodo inmutable');
+    } catch {
+      // Bot may lack permissions for server owner
     }
   }
+});
 
-  async shutdown(reason = 'UNKNOWN') {
-    shutdownLog(`Bot is shutting down (${reason})...`);
-    logger.info(`\n${'='.repeat(60)}`);
-    logger.info(`🛑 Graceful Shutdown Initiated (${reason})`);
-    logger.info(`${'='.repeat(60)}`);
+// ══════════════════════════════════════════════════════════════
+//  SLASH COMMAND HANDLER
+// ══════════════════════════════════════════════════════════════
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
 
-    try {
-      
-      logger.info('Stopping cron jobs...');
-      cron.getTasks().forEach(task => task.stop());
-      logger.info('✅ Cron jobs stopped');
+  const db = loadDB();
+  const userId = interaction.user.id;
 
-      logger.info('Stopping music players...');
-      await shutdownMusic(this);
-      logger.info('✅ Music players stopped');
-
-      if (this.webServer) {
-        logger.info('Closing web server...');
-        await new Promise((resolve) => this.webServer.close(resolve));
-        logger.info('✅ Web server closed');
-      }
-
-      // Close database connection
-      // Close database connection
-      if (this.db && this.db.db) {
-        logger.info('Closing database connection...');
-        try {
-          if (this.db.db.pool) {
-            await this.db.db.pool.end();
-            logger.info('✅ Database connection closed');
-          }
-        } catch (error) {
-          logger.warn('Error closing database pool:', error.message);
-        }
-      }
-
-      logger.info('Destroying Discord client...');
-      if (this.isReady()) {
-        try {
-          this.destroy();
-          logger.info('✅ Discord client destroyed');
-        } catch (error) {
-
-          logger.warn('Discord client destroy warning (non-critical):', error.message);
-        }
-      }
-
-      logger.info('✅ Graceful shutdown complete');
-  shutdownLog('Bot stopped successfully.');
-      process.exit(0);
-    } catch (error) {
-      logger.error('Error during graceful shutdown:', error);
-      process.exit(1);
-    }
-  }
-}
-
-try {
-  const bot = new TitanBot();
-  
-  const setupShutdown = () => {
-    process.on('SIGTERM', () => bot.shutdown('SIGTERM'));
-    process.on('SIGINT', () => bot.shutdown('SIGINT'));
-    
-    process.on('uncaughtException', (error) => {
-      // Process state may be corrupt after an uncaught throw; log and shut down cleanly.
-      handleTaskError('uncaught_exception', error, { fatal: true });
-      bot.shutdown('UNCAUGHT_EXCEPTION');
-    });
-
-    process.on('unhandledRejection', (reason) => {
-      const code = reason?.code;
-      if (code === 10062 || code === 40060 || code === 50027) {
-        logger.warn('Recoverable Discord interaction rejection:', reason?.message || reason);
-        return;
-      }
-      if (reason?.message?.includes('Queue is empty')) {
-        return;
-      }
-
-      // A stray rejection is a bug to fix, not a reason to take the bot down.
-      // Log loudly with full context; the central task handler categorizes it.
-      handleTaskError('unhandled_rejection', reason instanceof Error ? reason : new Error(String(reason)), {
-        errorCode: ErrorCodes.UNHANDLED_REJECTION,
+  // ── /registro ──────────────────────────────────────────
+  if (interaction.commandName === 'registro') {
+    const userData = db.users[userId];
+    if (!userData) {
+      return interaction.reply({
+        embeds: [systemEmbed(
+          'Registro No Encontrado',
+          'No estás registrado en el Sistema.\n\nTu número se asigna automáticamente al unirte al servidor.',
+        )],
+        ephemeral: true,
       });
-    });
-  };
-  
-  setupShutdown();
-  bot.start().catch((error) => {
-    logger.error('Fatal error during bot startup:', error);
-    bot.shutdown('STARTUP_ERROR');
-  });
-} catch (error) {
-  logger.error('Fatal error during bot startup:', error);
-  process.exit(1);
-}
+    }
 
-export default TitanBot;
+    const nick = userData.customName || constellationNick(userData.number);
+    const embed = systemEmbed(
+      'Registro de Constelación',
+      `**Designación:** \`${nick}\`\n` +
+      `**Número:** \`N-${padNumber(userData.number)}\`\n` +
+      `**Puntos Estelares:** ${userData.points} ⭐\n` +
+      `**Registrado:** ${new Date(userData.joinedAt).toLocaleDateString('es-ES')}\n` +
+      `**Estado:** ${userData.customName ? '🌟 Nombre Propio' : '⬜ Sin Nombre'}`,
+    );
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
+  // ── /puntos ────────────────────────────────────────────
+  if (interaction.commandName === 'puntos') {
+    const userData = db.users[userId];
+    if (!userData) {
+      return interaction.reply({
+        embeds: [systemEmbed('Error', 'No estás registrado en el Sistema.')],
+        ephemeral: true,
+      });
+    }
+
+    const embed = systemEmbed(
+      'Puntos Estelares',
+      `**${userData.customName || constellationNick(userData.number)}**\n\n` +
+      `⭐ **${userData.points}** Puntos Estelares\n\n` +
+      `> Usa \`/diario\` para reclamar +200 ⭐ cada día.`,
+    );
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
+  // ── /ranking ───────────────────────────────────────────
+  if (interaction.commandName === 'ranking') {
+    const sorted = Object.entries(db.users)
+      .sort(([, a], [, b]) => b.points - a.points)
+      .slice(0, 10);
+
+    if (sorted.length === 0) {
+      return interaction.reply({
+        embeds: [systemEmbed('Ranking', 'Aún no hay constelaciones registradas.')],
+      });
+    }
+
+    const medals = ['🥇', '🥈', '🥉'];
+    let desc = '';
+    for (let i = 0; i < sorted.length; i++) {
+      const [uid, data] = sorted[i];
+      const name = data.customName || constellationNick(data.number);
+      const medal = medals[i] || `**${i + 1}.**`;
+      desc += `${medal} \`${name}\` — ${data.points} ⭐\n`;
+    }
+
+    const embed = systemEmbed('🏆 Ranking de Constelaciones — Top 10', desc);
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /diario ────────────────────────────────────────────
+  if (interaction.commandName === 'diario') {
+    const userData = db.users[userId];
+    if (!userData) {
+      return interaction.reply({
+        embeds: [systemEmbed('Error', 'No estás registrado en el Sistema.')],
+        ephemeral: true,
+      });
+    }
+
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10); // YYYY-MM-DD
+
+    if (userData.lastDaily === today) {
+      return interaction.reply({
+        embeds: [systemEmbed(
+          'Puntos Diarios',
+          '⏳ Ya has reclamado tus puntos hoy.\n\nVuelve mañana para reclamar +200 ⭐.',
+        )],
+        ephemeral: true,
+      });
+    }
+
+    userData.points += 200;
+    userData.lastDaily = today;
+    saveDB(db);
+
+    const embed = systemEmbed(
+      'Puntos Diarios Reclamados',
+      `✅ Has recibido **+200 ⭐** Puntos Estelares.\n\n` +
+      `⭐ **Total:** ${userData.points} Puntos Estelares\n\n` +
+      `> *Vuelve mañana para reclamar más.*`,
+    );
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /info ──────────────────────────────────────────────
+  if (interaction.commandName === 'info') {
+    const embed = systemEmbed(
+      'Sistema del Absoluto — Información',
+      `**¿Qué es el Sistema del Absoluto?**\n` +
+      `El Sistema es la entidad que gobierna el Dominio Absoluto, ` +
+      `un mundo donde el Jugador enfrenta escenarios creados por las Constelaciones.\n\n` +
+      `**Roles:**\n` +
+      `🔷 **El Ser Absoluto** — Soberano del Dominio. Su palabra es ley.\n` +
+      `🟢 **El Jugador** — Protagonista de los escenarios en Minecraft.\n` +
+      `🔴 **Cronos** — Ejecutor del Caos. Envía calamidades.\n` +
+      `🟡 **Aura** — Ejecutora de Bendiciones.\n` +
+      `⬜ **Constelaciones** — Los espectadores. Pueden influir con Puntos Estelares.\n\n` +
+      `**Reglas Clave:**\n` +
+      `1️⃣ El Ser Absoluto tiene poder de veto sobre cualquier escenario.\n` +
+      `2️⃣ Los puntos se ganan con \`/diario\` y actividad.\n` +
+      `3️⃣ Tu número de constelación es **inmutable** hasta obtener Nombre Propio.\n` +
+      `4️⃣ El Mercado Estelar llegará en la **v2.0**.\n\n` +
+      `⟡ [Página Web del Sistema](https://eldominioabsoluto.com) · ` +
+      `[YouTube](https://youtube.com/@eldominioabsoluto)`,
+    );
+    return interaction.reply({ embeds: [embed] });
+  }
+
+  // ── /reset-constelacion ────────────────────────────────
+  if (interaction.commandName === 'reset-constelacion') {
+    const target = interaction.options.getUser('usuario');
+    if (!db.users[target.id]) {
+      return interaction.reply({
+        embeds: [systemEmbed('Error', 'Esa constelación no está registrada.')],
+        ephemeral: true,
+      });
+    }
+
+    // Keep the number, reset points
+    db.users[target.id].points = 0;
+    db.users[target.id].lastDaily = null;
+    saveDB(db);
+
+    return interaction.reply({
+      embeds: [systemEmbed(
+        'Constelación Reiniciada',
+        `Los puntos de **${constellationNick(db.users[target.id].number)}** han sido reiniciados a 0.`,
+      )],
+      ephemeral: true,
+    });
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+//  WEB SERVER (Railway health check)
+// ══════════════════════════════════════════════════════════════
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.json({
+    status: '⬛ Sistema del Absoluto — En Línea',
+    version: '1.0.0',
+    uptime: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`⟡ Servidor web en puerto ${PORT}`);
+});
+
+// ══════════════════════════════════════════════════════════════
+//  LOGIN
+// ══════════════════════════════════════════════════════════════
+client.login(process.env.DISCORD_TOKEN).catch((err) => {
+  console.error('❌ Error al conectar con Discord:', err.message);
+  process.exit(1);
+});
