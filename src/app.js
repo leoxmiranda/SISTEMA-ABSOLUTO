@@ -114,7 +114,7 @@ const commands = [
     .setDescription('📖 Información sobre el Sistema del Absoluto y sus reglas.'),
 
   new SlashCommandBuilder()
-    .setName('manual')
+    .setName('instrucciones')
     .setDescription('📚 Manual oficial del Sistema del Absoluto. Consulta reglas, roles y entidades.'),
 
   new SlashCommandBuilder()
@@ -382,8 +382,8 @@ client.on('interactionCreate', async (interaction) => {
     return interaction.reply({ embeds: [embed] });
   }
 
-  // ── /manual ──────────────────────────────────────────────
-  if (interaction.commandName === 'manual') {
+  // ── /instrucciones ──────────────────────────────────────────────
+  if (interaction.commandName === 'instrucciones') {
     const manualEmbed = new EmbedBuilder()
       .setColor(0x00cfff)
       .setTitle('📚 MANUAL OFICIAL — Sistema del Absoluto')
