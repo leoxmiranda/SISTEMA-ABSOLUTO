@@ -1,9 +1,13 @@
-const { EmbedBuilder } = require('discord.js');
-const fs = require('fs');
-const path = require('path');
+import { EmbedBuilder } from 'discord.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Ruta a la base de datos local JSON (persistencia por ID única de Discord)
-const dbPath = path.join(__dirname, '../../../../data/constellations.json');
+const dbPath = path.join(__dirname, '../../../data/constellations.json');
 
 function loadDatabase() {
     const dir = path.dirname(dbPath);
@@ -18,10 +22,8 @@ function saveDatabase(data) {
     fs.writeFileSync(dbPath, JSON.stringify(data, null, 2));
 }
 
-module.exports = {
-    data: {
-        name: 'verify_user' // Coincide exactamente con el customId del botón
-    },
+export default {
+    name: 'verify_user', // 👈 Clave raíz idéntica al customId del botón
     async execute(interaction, client) {
         if (!interaction.isButton()) return;
         
