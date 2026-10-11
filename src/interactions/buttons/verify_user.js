@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Ruta a la base de datos local JSON (persistencia por ID única de Discord)
+// Ruta a la base de datos local JSON
 const dbPath = path.join(__dirname, '../../../data/constellations.json');
 
 function loadDatabase() {
@@ -23,26 +23,26 @@ function saveDatabase(data) {
 }
 
 export default {
-    name: 'verify_user', // 👈 Clave raíz idéntica al customId del botón
+    name: 'verify_user',
     async execute(interaction, client) {
         if (!interaction.isButton()) return;
         
-        // 🔒 Respuesta diferida EFÍMERA (Privada, solo la ve el usuario)
+        // 🔒 Respuesta diferida EFÍMERA (Privada)
         await interaction.deferReply({ ephemeral: true });
 
         const userId = interaction.user.id;
         const member = interaction.member;
         const guild = interaction.guild;
 
-        // ⚠️ CONFIGURACIÓN DE IDs EN TU DISCORD
-        const ROLE_ID = '1557455677365035140'; // ID del rol "Constelación Sin Nombre"
-        const WELCOME_CHANNEL_ID = '1558813866991951902'; // ID del canal ✨︱bienvenida-constelaciones
+        // ⚠️ IDs CONFIGURADOS
+        const ROLE_ID = '1557455677365035140'; // Rol "Constelación Sin Nombre"
+        const WELCOME_CHANNEL_ID = '1558813866991951902'; // Canal ✨︱bienvenida-constelaciones
 
         const db = loadDatabase();
         let userRecord = db.users[userId];
         const hasRole = member.roles.cache.has(ROLE_ID);
 
-        // 🚫 CASO 1: EL USUARIO YA ESTÁ REGISTRADO Y TIENE EL ROL DENTRO DEL SERVIDOR
+        // 🚫 CASO 1: YA ESTÁ REGISTRADO Y TIENE EL ROL
         if (userRecord && hasRole) {
             const alreadyRegisteredEmbed = new EmbedBuilder()
                 .setColor('#f1c40f')
@@ -56,11 +56,11 @@ export default {
         let assignedNickname = '';
 
         if (userRecord) {
-            // 🔄 CASO 2: CONSTELACIÓN QUE REGRESA AL SERVIDOR (Recupera su registro previo)
+            // 🔄 CASO 2: REGRESA AL SERVIDOR
             isReturningUser = true;
             assignedNickname = userRecord.nickname || `[Constelación Sin Nombre N.º${String(userRecord.number).padStart(7, '0')}]`;
         } else {
-            // ✨ CASO 3: NUEVA CONSTELACIÓN EN SECUENCIA
+            // ✨ CASO 3: NUEVA CONSTELACIÓN
             db.lastCounter += 1;
             const formattedNumber = String(db.lastCounter).padStart(7, '0');
             assignedNickname = `[Constelación Sin Nombre N.º${formattedNumber}]`;
@@ -73,42 +73,52 @@ export default {
         }
 
         try {
-            // Asignar el rol
+            // 1. Asignar el rol
             const role = guild.roles.cache.get(ROLE_ID);
             if (role && !hasRole) {
                 await member.roles.add(role);
             }
 
-            // Cambiar el apodo automáticamente
-            await member.setNickname(assignedNickname);
+            // 2. Cambiar apodo (Evita error si es el dueño del servidor)
+            if (guild.ownerId !== userId) {
+                await member.setNickname(assignedNickname);
+            }
 
-            // Actualizar apodo actual en la base de datos
+            // Guardar apodo final en la BD
             db.users[userId].nickname = assignedNickname;
             saveDatabase(db);
 
-            // 📢 1. MENSAJE PÚBLICO EN ✨︱bienvenida-constelaciones
-            const welcomeChannel = guild.channels.cache.get(WELCOME_CHANNEL_ID);
-            if (welcomeChannel) {
-                if (isReturningUser) {
-                    const returnEmbed = new EmbedBuilder()
-                        .setColor('#00a8ff')
-                        .setTitle('🌌 [ SINTONIZACIÓN RESTABLECIDA ]')
-                        .setDescription(`La Constelación **${assignedNickname}** (${member}) ha reestablecido su conexión con el **Sistema del Dominio Absoluto**.\n\n*Su registro e historial permanecen intactos.*`)
-                        .setTimestamp();
-
-                    await welcomeChannel.send({ embeds: [returnEmbed] });
-                } else {
-                    const newEmbed = new EmbedBuilder()
-                        .setColor('#00ff88')
-                        .setTitle('✨ [ NUEVO REGISTRO EN EL SISTEMA ]')
-                        .setDescription(`Una nueva Constelación se ha registrado con éxito en el **Dominio Absoluto**.\n\n**Identidad Asignada:** \`${assignedNickname}\` (${member})\n*Bienvenido al plano de sintonización.*`)
-                        .setTimestamp();
-
-                    await welcomeChannel.send({ embeds: [newEmbed] });
+            // 📢 3. MENSAJE PÚBLICO EN EL CANAL DE BIENVENIDA (Usa .fetch para forzar la búsqueda)
+            try {
+                let welcomeChannel = guild.channels.cache.get(WELCOME_CHANNEL_ID);
+                if (!welcomeChannel) {
+                    welcomeChannel = await guild.channels.fetch(WELCOME_CHANNEL_ID);
                 }
+
+                if (welcomeChannel) {
+                    if (isReturningUser) {
+                        const returnEmbed = new EmbedBuilder()
+                            .setColor('#00a8ff')
+                            .setTitle('🌌 [ SINTONIZACIÓN RESTABLECIDA ]')
+                            .setDescription(`La Constelación **${assignedNickname}** (${member}) ha reestablecido su conexión con el **Sistema del Dominio Absoluto**.\n\n*Su registro e historial permanecen intactos.*`)
+                            .setTimestamp();
+
+                        await welcomeChannel.send({ embeds: [returnEmbed] });
+                    } else {
+                        const newEmbed = new EmbedBuilder()
+                            .setColor('#00ff88')
+                            .setTitle('✨ [ NUEVO REGISTRO EN EL SISTEMA ]')
+                            .setDescription(`Una nueva Constelación se ha registrado con éxito en el **Dominio Absoluto**.\n\n**Identidad Asignada:** \`${assignedNickname}\` (${member})\n*Bienvenido al plano de sintonización.*`)
+                            .setTimestamp();
+
+                        await welcomeChannel.send({ embeds: [newEmbed] });
+                    }
+                }
+            } catch (channelError) {
+                console.error('Error al enviar mensaje al canal de bienvenida:', channelError);
             }
 
-            // 🔒 2. MENSAJE PRIVADO (EFÍMERO) EN EL CANAL DE REGISTRO
+            // 🔒 4. MENSAJE PRIVADO (EFÍMERO)
             const privateEmbed = new EmbedBuilder()
                 .setColor('#2b2d31')
                 .setTitle('🌌 [ SINCRONIZACIÓN EXITOSA ]')
@@ -119,9 +129,9 @@ export default {
             return interaction.editReply({ embeds: [privateEmbed] });
 
         } catch (error) {
-            console.error('Error al sintonizar usuario:', error);
+            console.error('Error crítico al sintonizar usuario:', error);
             return interaction.editReply({
-                content: '⚠️ Tu registro fue guardado, pero ocurrió un error al actualizar el apodo o publicar el mensaje. Revisa que el rol del bot esté por encima en la jerarquía de roles.'
+                content: '⚠️ Hubo un error al procesar tu sintonización. Verifica que el rol del bot esté por encima del rol asignado en la jerarquía del servidor.'
             });
         }
     }
